@@ -20,6 +20,17 @@ from datetime import date, datetime, timedelta
 import requests
 from icalendar import Calendar
 
+# Testo che il sito UniPD aggiunge al titolo/descrizione di una lezione
+# annullata, invece di rimuoverla dall'export.
+CANCELLED_MARKER = "annullato"
+
+
+def is_cancelled(component) -> bool:
+    summary = str(component.get("SUMMARY", ""))
+    description = str(component.get("DESCRIPTION", ""))
+    text = f"{summary} {description}".lower()
+    return CANCELLED_MARKER in text
+
 # ---------------------------------------------------------------------------
 # CONFIGURAZIONE
 # ---------------------------------------------------------------------------
@@ -91,11 +102,15 @@ def main() -> None:
     print(f"Ricontrollo le settimane dal {window_start:%d-%m-%Y} al {window_end:%d-%m-%Y}")
 
     fresh_events = {}
+    skipped_cancelled = 0
     for monday in check_mondays:
         print(f"  scarico settimana {monday:%d-%m-%Y}")
         ics_bytes = fetch_week(monday)
         cal = Calendar.from_ical(ics_bytes)
         for component in cal.walk("VEVENT"):
+            if is_cancelled(component):
+                skipped_cancelled += 1
+                continue
             fresh_events[str(component.get("UID"))] = component
 
     existing_cal = load_existing(OUTPUT_PATH)
@@ -127,7 +142,8 @@ def main() -> None:
 
     print(
         f"Eventi totali: {len(final_events)} | "
-        f"nuovi/aggiornati: {added} | rimossi (cancellati): {removed}"
+        f"nuovi/aggiornati: {added} | rimossi (cancellati): {removed} | "
+        f"annullati esclusi dalla fonte: {skipped_cancelled}"
     )
 
 

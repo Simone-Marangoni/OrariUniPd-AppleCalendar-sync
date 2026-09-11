@@ -1,15 +1,21 @@
 """
-Scarica dall'Agenda Web di UniPD gli orari della settimana che inizia tra
-WEEKS_AHEAD settimane, e li unisce a un file .ics cumulativo (docs/calendar.ics)
-che puoi pubblicare con GitHub Pages e sottoscrivere una sola volta su
-Calendario Apple (o Google Calendar).
+Scarica dall'Agenda Web di UniPD gli orari delle lezioni e li mantiene
+sincronizzati in un file .ics cumulativo (docs/calendar.ics), da pubblicare
+con GitHub Pages e sottoscrivere una sola volta su Calendario Apple.
 
-Ogni evento nell'ics di UniPD ha un UID stabile: lo script lo usa per evitare
-duplicati e per aggiornare un evento se orario/aula cambiano.
+Comportamento:
+- Ogni nuova settimana compare per la prima volta WEEKS_AHEAD settimane
+  prima che inizi.
+- Ad ogni esecuzione, oltre alla nuova settimana, vengono RICONTROLLATE
+  anche le settimane già pubblicate (dalla settimana corrente fino a
+  WEEKS_AHEAD settimane nel futuro): se una lezione che prima c'era ora
+  non compare più nella fonte, viene considerata cancellata e rimossa dal
+  file pubblicato. Le settimane più vecchie della settimana corrente non
+  vengono più ricontrollate (restano "congelate" nello storico).
 """
 
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import requests
 from icalendar import Calendar
@@ -18,8 +24,6 @@ from icalendar import Calendar
 # CONFIGURAZIONE
 # ---------------------------------------------------------------------------
 
-# URL copiato dal pulsante di export dell'Agenda Web (contiene già il tuo
-# corso/canale/anno). La parte "date=28-09-2026" viene sostituita a runtime.
 SOURCE_URL_TEMPLATE = (
     "https://agendastudentiunipd.easystaff.it/export/ec_download_ical_grid.php?"
     "view=easycourse&form-type=corso&include=corso&txtcurr=1+-+GENERALE+%28canale+1%29"
@@ -32,21 +36,28 @@ SOURCE_URL_TEMPLATE = (
     "&txtanno=&docente=&attivita=&txtdocente=&txtattivita="
 )
 
-# Quante settimane prima dell'inizio della settimana va pubblicata.
+# Quante settimane prima dell'inizio una settimana compare per la prima volta.
 WEEKS_AHEAD = 2
 
-# Dove viene scritto il calendario cumulativo (servito da GitHub Pages se
-# messo dentro /docs).
 OUTPUT_PATH = "docs/calendar.ics"
 
 # ---------------------------------------------------------------------------
 
 
-def get_target_monday() -> datetime:
-    """Lunedì della settimana che inizia tra WEEKS_AHEAD settimane."""
+def get_this_monday() -> datetime:
     today = datetime.now()
-    this_monday = today - timedelta(days=today.weekday())
-    return this_monday + timedelta(weeks=WEEKS_AHEAD)
+    return today - timedelta(days=today.weekday())
+
+
+def get_check_mondays() -> list[datetime]:
+    """Lunedì delle settimane da (ri)controllare ad ogni esecuzione: dalla
+    settimana corrente fino a WEEKS_AHEAD settimane nel futuro."""
+    this_monday = get_this_monday()
+    return [this_monday + timedelta(weeks=i) for i in range(0, WEEKS_AHEAD + 1)]
+
+
+def to_date(value) -> date:
+    return value.date() if hasattr(value, "date") else value
 
 
 def fetch_week(monday: datetime) -> bytes:
@@ -72,38 +83,52 @@ def load_existing(path: str) -> Calendar:
     return cal
 
 
-def merge(existing_cal: Calendar, new_ics_bytes: bytes) -> Calendar:
-    new_cal = Calendar.from_ical(new_ics_bytes)
+def main() -> None:
+    check_mondays = get_check_mondays()
+    window_start = check_mondays[0].date()
+    window_end = (check_mondays[-1] + timedelta(days=7)).date()
 
-    events_by_uid = {}
+    print(f"Ricontrollo le settimane dal {window_start:%d-%m-%Y} al {window_end:%d-%m-%Y}")
+
+    fresh_events = {}
+    for monday in check_mondays:
+        print(f"  scarico settimana {monday:%d-%m-%Y}")
+        ics_bytes = fetch_week(monday)
+        cal = Calendar.from_ical(ics_bytes)
+        for component in cal.walk("VEVENT"):
+            fresh_events[str(component.get("UID"))] = component
+
+    existing_cal = load_existing(OUTPUT_PATH)
+
+    final_events = {}
+    removed = 0
     for component in existing_cal.walk("VEVENT"):
-        events_by_uid[str(component.get("UID"))] = component
-    for component in new_cal.walk("VEVENT"):
-        events_by_uid[str(component.get("UID"))] = component  # upsert
+        uid = str(component.get("UID"))
+        dtstart_date = to_date(component.get("DTSTART").dt)
+        in_checked_window = window_start <= dtstart_date < window_end
+        if in_checked_window and uid not in fresh_events:
+            removed += 1
+            continue
+        final_events[uid] = component
+
+    added = sum(1 for uid in fresh_events if uid not in final_events)
+    final_events.update(fresh_events)
 
     merged = Calendar()
     merged.add("prodid", "-//OrariUniPD Auto Export//")
     merged.add("version", "2.0")
     merged.add("x-wr-timezone", "Europe/Rome")
-    for comp in events_by_uid.values():
+    for comp in final_events.values():
         merged.add_component(comp)
-    return merged
-
-
-def main() -> None:
-    target_monday = get_target_monday()
-    print(f"Scarico la settimana che inizia il {target_monday.strftime('%d-%m-%Y')}")
-
-    new_ics = fetch_week(target_monday)
-    existing_cal = load_existing(OUTPUT_PATH)
-    merged_cal = merge(existing_cal, new_ics)
 
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     with open(OUTPUT_PATH, "wb") as f:
-        f.write(merged_cal.to_ical())
+        f.write(merged.to_ical())
 
-    total = len(merged_cal.walk("VEVENT"))
-    print(f"Fatto: {total} eventi totali salvati in {OUTPUT_PATH}")
+    print(
+        f"Eventi totali: {len(final_events)} | "
+        f"nuovi/aggiornati: {added} | rimossi (cancellati): {removed}"
+    )
 
 
 if __name__ == "__main__":

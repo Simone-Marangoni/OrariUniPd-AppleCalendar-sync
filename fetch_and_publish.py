@@ -20,6 +20,8 @@ from datetime import date, datetime, timedelta
 import requests
 from icalendar import Calendar
 
+from event_formatting import restructure_event
+
 # Testo che il sito UniPD aggiunge al titolo/descrizione di una lezione
 # annullata, invece di rimuoverla dall'export.
 CANCELLED_MARKER = "annullato"
@@ -111,6 +113,7 @@ def main() -> None:
             if is_cancelled(component):
                 skipped_cancelled += 1
                 continue
+            restructure_event(component)
             fresh_events[str(component.get("UID"))] = component
 
     existing_cal = load_existing(OUTPUT_PATH)

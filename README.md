@@ -23,7 +23,7 @@ sottoscrivere **una sola volta**. Da lì in poi si aggiorna da solo.
 - Apri **Impostazioni → App → Calendario → Account** (su iOS più recenti:
   Impostazioni → Calendario → Account).
 - "Aggiungi account" → "Altro" → "Aggiungi calendario sottoscritto".
-- Incolla l'URL: `https://simone-marangoni.github.io/OrariUniPd-AppleCalendar-sync/`
+- Incolla l'URL: `https://simone-marangoni.github.io/OrariUniPd-AppleCalendar-sync/calendar.ics`
 - Salva. Fatto: da ora in poi si aggiorna da solo (iOS controlla gli
   aggiornamenti periodicamente, di solito ogni poche ore/un giorno).
 

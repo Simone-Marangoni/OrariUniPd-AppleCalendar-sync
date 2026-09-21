@@ -2,8 +2,8 @@ name: Aggiorna calendario OrariUniPD
 
 on:
   schedule:
-    # Ogni giorno alle 06:00 UTC (circa le 07:00/08:00 ora italiana)
-    - cron: "0 1 * * *"
+    # Ogni giorno alle 01:00 UTC (circa le 02:00/03:00 ora italiana)
+    - cron: "16 1 * * *"
   workflow_dispatch: {}   # permette anche di lanciarlo a mano dal tab Actions
 
 permissions:

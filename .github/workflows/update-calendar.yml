@@ -2,7 +2,7 @@ name: Aggiorna calendario OrariUniPD
 
 on:
   schedule:
-    # Ogni giorno alle 01:00 UTC (circa le 02:00/03:00 ora italiana)
+    # Ogni giorno alle 01:16 UTC (circa le 02:16/03:16 ora italiana)
     - cron: "16 1 * * *"
   workflow_dispatch: {}   # permette anche di lanciarlo a mano dal tab Actions
 
@@ -20,7 +20,7 @@ jobs:
           python-version: "3.11"
 
       - name: Installa dipendenze
-        run: pip install requests icalendar
+        run: pip install -r requirements.txt
 
       - name: Scarica ed unisci la settimana target
         run: python fetch_and_publish.py

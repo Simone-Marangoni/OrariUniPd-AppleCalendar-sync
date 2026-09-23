@@ -34,10 +34,16 @@ _SUMMARY_RE = re.compile(
 )
 
 
+_CANCELLED_PREFIX = "❌ [ANNULLATA]"
+
+
 def parse_raw_summary(raw_summary: str):
     """Prova a scomporre il SUMMARY grezzo. Ritorna un dict di campi, oppure
     None se il formato non è riconosciuto (fallback: nessuna modifica)."""
-    match = _SUMMARY_RE.match(raw_summary.strip())
+    text = raw_summary.strip()
+    if text.startswith(_CANCELLED_PREFIX):
+        text = text[len(_CANCELLED_PREFIX) :].strip()
+    match = _SUMMARY_RE.match(text)
     if not match:
         return None
     data = match.groupdict()
@@ -57,6 +63,7 @@ def restructure_event(component) -> None:
     visualizzazione più ordinata su Calendario Apple. Non fa nulla se il
     formato del SUMMARY non viene riconosciuto."""
     raw_summary = str(component.get("SUMMARY", ""))
+    was_cancelled = raw_summary.startswith(_CANCELLED_PREFIX)
     parsed = parse_raw_summary(raw_summary)
     if parsed is None:
         return
@@ -74,6 +81,9 @@ def restructure_event(component) -> None:
     if parsed["attivita"]:
         note_lines.append(f"Tipo: {parsed['attivita']}")
     note_lines.append(f"Originale: {raw_summary}")
+
+    if was_cancelled:
+        title = f"{_CANCELLED_PREFIX} {title}"
 
     component["SUMMARY"] = title
     component["LOCATION"] = location

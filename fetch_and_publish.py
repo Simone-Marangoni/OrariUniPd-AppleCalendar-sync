@@ -1,42 +1,32 @@
 """
-Scarica dall'Agenda Web di UniPD gli orari delle lezioni e li mantiene
-sincronizzati in un file .ics cumulativo (docs/calendar.ics), da pubblicare
-con GitHub Pages e sottoscrivere una sola volta su Calendario Apple.
+Scarica dall'Agenda Web di UniPD gli orari di un intervallo di settimane
+(da questa settimana fino a WEEKS_RANGE settimane nel futuro) e li unisce a
+un file .ics cumulativo (docs/calendar.ics) che puoi pubblicare con GitHub
+Pages e sottoscrivere una sola volta su Calendario Apple (o Google Calendar).
 
-Comportamento:
-- Ogni nuova settimana compare per la prima volta WEEKS_AHEAD settimane
-  prima che inizi.
-- Ad ogni esecuzione, oltre alla nuova settimana, vengono RICONTROLLATE
-  anche le settimane già pubblicate (dalla settimana corrente fino a
-  WEEKS_AHEAD settimane nel futuro): se una lezione che prima c'era ora
-  non compare più nella fonte, viene considerata cancellata e rimossa dal
-  file pubblicato. Le settimane più vecchie della settimana corrente non
-  vengono più ricontrollate (restano "congelate" nello storico).
+A differenza della prima versione, ogni settimana viene RI-scaricata ogni
+giorno finché rientra nell'intervallo, non solo la prima volta che compare a
+WEEKS_AHEAD settimane di distanza. Questo permette di rilevare eventuali
+variazioni fatte da UniPD dopo il primo caricamento: annullamenti, cambi di
+aula, cambi di orario, ecc. — perché lo stesso UID viene semplicemente
+sovrascritto (upsert) con la versione più recente.
+
+Ogni evento nell'ics di UniPD ha un UID stabile: lo script lo usa per evitare
+duplicati e per aggiornare un evento se orario/aula/stato cambiano.
 """
 
 import os
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import requests
 from icalendar import Calendar
-
-from event_formatting import restructure_event
-
-# Testo che il sito UniPD aggiunge al titolo/descrizione di una lezione
-# annullata, invece di rimuoverla dall'export.
-CANCELLED_MARKER = "annullato"
-
-
-def is_cancelled(component) -> bool:
-    summary = str(component.get("SUMMARY", ""))
-    description = str(component.get("DESCRIPTION", ""))
-    text = f"{summary} {description}".lower()
-    return CANCELLED_MARKER in text
 
 # ---------------------------------------------------------------------------
 # CONFIGURAZIONE
 # ---------------------------------------------------------------------------
 
+# URL copiato dal pulsante di export dell'Agenda Web (contiene già il tuo
+# corso/canale/anno). La parte "date=28-09-2026" viene sostituita a runtime.
 SOURCE_URL_TEMPLATE = (
     "https://agendastudentiunipd.easystaff.it/export/ec_download_ical_grid.php?"
     "view=easycourse&form-type=corso&include=corso&txtcurr=1+-+GENERALE+%28canale+1%29"
@@ -49,28 +39,27 @@ SOURCE_URL_TEMPLATE = (
     "&txtanno=&docente=&attivita=&txtdocente=&txtattivita="
 )
 
-# Quante settimane prima dell'inizio una settimana compare per la prima volta.
-WEEKS_AHEAD = 2
+# Quante settimane totali coprire ogni giorno, a partire da questa settimana
+# (settimana corrente inclusa). Con WEEKS_RANGE = 3: questa settimana + le
+# prossime 2 vengono ri-scaricate e ri-controllate ogni giorno.
+WEEKS_RANGE = 3
 
+# Dove viene scritto il calendario cumulativo (servito da GitHub Pages se
+# messo dentro /docs).
 OUTPUT_PATH = "docs/calendar.ics"
 
 # ---------------------------------------------------------------------------
 
 
-def get_this_monday() -> datetime:
+def get_target_mondays() -> list[datetime]:
+    """Lunedì di ciascuna settimana da ricontrollare oggi.
+
+    Restituisce WEEKS_RANGE lunedì consecutivi, a partire dal lunedì della
+    settimana corrente.
+    """
     today = datetime.now()
-    return today - timedelta(days=today.weekday())
-
-
-def get_check_mondays() -> list[datetime]:
-    """Lunedì delle settimane da (ri)controllare ad ogni esecuzione: dalla
-    settimana corrente fino a WEEKS_AHEAD settimane nel futuro."""
-    this_monday = get_this_monday()
-    return [this_monday + timedelta(weeks=i) for i in range(0, WEEKS_AHEAD + 1)]
-
-
-def to_date(value) -> date:
-    return value.date() if hasattr(value, "date") else value
+    this_monday = today - timedelta(days=today.weekday())
+    return [this_monday + timedelta(weeks=i) for i in range(WEEKS_RANGE)]
 
 
 def fetch_week(monday: datetime) -> bytes:
@@ -80,8 +69,9 @@ def fetch_week(monday: datetime) -> bytes:
     resp.raise_for_status()
     if not resp.content.strip().startswith(b"BEGIN:VCALENDAR"):
         raise RuntimeError(
-            "La risposta non sembra un file .ics valido. "
-            "Il link potrebbe essere scaduto o richiedere di nuovo il login."
+            f"La risposta per la settimana del {date_str} non sembra un file "
+            ".ics valido. Il link potrebbe essere scaduto o richiedere di "
+            "nuovo il login."
         )
     return resp.content
 
@@ -96,58 +86,50 @@ def load_existing(path: str) -> Calendar:
     return cal
 
 
+def merge(existing_cal: Calendar, new_ics_bytes: bytes, events_by_uid: dict) -> None:
+    """Aggiorna events_by_uid in place con gli eventi del nuovo ics (upsert)."""
+    new_cal = Calendar.from_ical(new_ics_bytes)
+    for component in new_cal.walk("VEVENT"):
+        events_by_uid[str(component.get("UID"))] = component
+
+
 def main() -> None:
-    check_mondays = get_check_mondays()
-    window_start = check_mondays[0].date()
-    window_end = (check_mondays[-1] + timedelta(days=7)).date()
-
-    print(f"Ricontrollo le settimane dal {window_start:%d-%m-%Y} al {window_end:%d-%m-%Y}")
-
-    fresh_events = {}
-    skipped_cancelled = 0
-    for monday in check_mondays:
-        print(f"  scarico settimana {monday:%d-%m-%Y}")
-        ics_bytes = fetch_week(monday)
-        cal = Calendar.from_ical(ics_bytes)
-        for component in cal.walk("VEVENT"):
-            if is_cancelled(component):
-                skipped_cancelled += 1
-                continue
-            restructure_event(component)
-            fresh_events[str(component.get("UID"))] = component
+    target_mondays = get_target_mondays()
+    print(
+        f"Ricontrollo {len(target_mondays)} settimane: "
+        + ", ".join(m.strftime("%d-%m-%Y") for m in target_mondays)
+    )
 
     existing_cal = load_existing(OUTPUT_PATH)
 
-    final_events = {}
-    removed = 0
+    events_by_uid = {}
     for component in existing_cal.walk("VEVENT"):
-        uid = str(component.get("UID"))
-        dtstart_date = to_date(component.get("DTSTART").dt)
-        in_checked_window = window_start <= dtstart_date < window_end
-        if in_checked_window and uid not in fresh_events:
-            removed += 1
+        events_by_uid[str(component.get("UID"))] = component
+
+    for monday in target_mondays:
+        print(f"Scarico la settimana che inizia il {monday.strftime('%d-%m-%Y')}")
+        try:
+            new_ics = fetch_week(monday)
+        except Exception as exc:
+            # Non blocchiamo le altre settimane se una singola fallisce
+            # (es. UniPD non ha ancora pubblicato quella settimana).
+            print(f"  Attenzione: impossibile scaricare questa settimana ({exc})")
             continue
-        final_events[uid] = component
+        merge(existing_cal, new_ics, events_by_uid)
 
-    added = sum(1 for uid in fresh_events if uid not in final_events)
-    final_events.update(fresh_events)
-
-    merged = Calendar()
-    merged.add("prodid", "-//OrariUniPD Auto Export//")
-    merged.add("version", "2.0")
-    merged.add("x-wr-timezone", "Europe/Rome")
-    for comp in final_events.values():
-        merged.add_component(comp)
+    merged_cal = Calendar()
+    merged_cal.add("prodid", "-//OrariUniPD Auto Export//")
+    merged_cal.add("version", "2.0")
+    merged_cal.add("x-wr-timezone", "Europe/Rome")
+    for comp in events_by_uid.values():
+        merged_cal.add_component(comp)
 
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     with open(OUTPUT_PATH, "wb") as f:
-        f.write(merged.to_ical())
+        f.write(merged_cal.to_ical())
 
-    print(
-        f"Eventi totali: {len(final_events)} | "
-        f"nuovi/aggiornati: {added} | rimossi (cancellati): {removed} | "
-        f"annullati esclusi dalla fonte: {skipped_cancelled}"
-    )
+    total = len(merged_cal.walk("VEVENT"))
+    print(f"Fatto: {total} eventi totali salvati in {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":

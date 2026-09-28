@@ -2,8 +2,9 @@ name: Aggiorna calendario OrariUniPD
 
 on:
   schedule:
-    # Ogni giorno alle 01:16 UTC (circa le 02:16/03:16 ora italiana)
-    - cron: "16 1 * * *"
+    # Esegui alle 05:15 e 16:15 UTC (circa 07:15 e 18:15 ora italiana)
+    # Evita la fascia notturna (01:00-04:00 UTC) soggetta a manutenzione EasyStaff UniPD
+    - cron: "15 5,16 * * *"
   workflow_dispatch: {}   # permette anche di lanciarlo a mano dal tab Actions
 
 permissions:
@@ -24,6 +25,17 @@ jobs:
 
       - name: Scarica ed unisci la settimana target
         run: python fetch_and_publish.py
+
+      - name: Verifica integrità calendario
+        run: |
+          if [ ! -s docs/calendar.ics ]; then
+            echo "Errore: docs/calendar.ics è assente o vuoto!"
+            exit 1
+          fi
+          if ! grep -q "BEGIN:VEVENT" docs/calendar.ics; then
+            echo "Errore: docs/calendar.ics non contiene eventi VEVENT!"
+            exit 1
+          fi
 
       - name: Salva il file aggiornato nel repository
         run: |

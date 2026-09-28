@@ -60,8 +60,21 @@ def extract_params_from_url(url: str) -> dict:
     return {k: (v[0] if len(v) == 1 else v) for k, v in qs.items()}
 
 
-def _urlopen(req: urllib.request.Request, timeout: int = 30):
-    return urllib.request.urlopen(req, timeout=timeout)
+import time
+import urllib.error
+
+def _urlopen(req: urllib.request.Request, timeout: int = 30, max_retries: int = 3):
+    last_err: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_err = exc
+            if attempt < max_retries - 1:
+                time.sleep(2 * (attempt + 1))
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("Richiesta di rete fallita senza eccezione specifica.")
 
 
 def fetch_grid_cells(date_str: str, base_params: dict) -> list[dict]:
@@ -81,11 +94,11 @@ def fetch_week_ics(monday: datetime, url_template: str = SOURCE_URL_TEMPLATE) ->
     req = urllib.request.Request(url, headers=HTTP_HEADERS)
     with _urlopen(req, timeout=30) as resp:
         content = resp.read()
-    if not content.strip().startswith(b"BEGIN:VCALENDAR"):
+    stripped = content.strip()
+    if not (stripped.startswith(b"BEGIN:VCALENDAR") and stripped.endswith(b"END:VCALENDAR")):
         raise RuntimeError(
             f"La risposta per la settimana del {date_str} non sembra un file "
-            ".ics valido. Il link potrebbe essere scaduto o richiedere di "
-            "nuovo il login."
+            ".ics valido o completo. Il server potrebbe essere in manutenzione."
         )
     return content
 

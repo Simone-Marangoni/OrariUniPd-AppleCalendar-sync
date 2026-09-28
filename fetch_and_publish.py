@@ -120,6 +120,9 @@ def prune_orphans(
     fetched_ranges: list[tuple],
 ) -> int:
     """Rimuove eventi della sola finestra effettivamente scaricata, non più presenti su UniPD."""
+    if not seen_uids:
+        # Protezione: se non è stato scaricato alcun evento valido, non rimuovere nulla
+        return 0
     pruned = 0
     for uid, comp in list(events_by_uid.items()):
         if uid in seen_uids:
@@ -134,7 +137,12 @@ def prune_orphans(
     return pruned
 
 
-def write_calendar(events_by_uid: dict, path: str) -> Calendar:
+def write_calendar(events_by_uid: dict, path: str, allow_empty: bool = False) -> Calendar:
+    if not events_by_uid and not allow_empty:
+        raise RuntimeError(
+            "Tentativo di scrivere un calendario vuoto (0 eventi). "
+            "Operazione annullata per non cancellare le lezioni su Apple Calendar."
+        )
     merged_cal = Calendar()
     merged_cal.add("prodid", "-//OrariUniPD Auto Export//")
     merged_cal.add("version", "2.0")
@@ -176,6 +184,7 @@ def main() -> None:
         print(f"\nElaboro la settimana del {date_str}:")
 
         cancelled_cells: list[dict] = []
+        cells: list[dict] = []
         grid_ok = False
         try:
             cells = fetch_grid_cells(date_str, web_params)
@@ -200,6 +209,16 @@ def main() -> None:
             print(f"  ⚠️  Impossibile scaricare l'export .ics per questa settimana ({exc})")
             continue
 
+        raw_cal = Calendar.from_ical(new_ics)
+        raw_events_count = len(list(raw_cal.walk("VEVENT")))
+
+        if raw_events_count == 0 and grid_ok and len(cells) > 0:
+            print(
+                f"  ⚠️  Anomalia: la griglia web riporta {len(cells)} lezioni, ma l'export .ics ne contiene 0! "
+                "Salto questa settimana per non cancellare dati validi."
+            )
+            continue
+
         added, cancelled = merge_week_events(
             new_ics,
             events_by_uid,
@@ -209,9 +228,20 @@ def main() -> None:
             restructure=RESTRUCTURE_EVENTS,
             grid_ok=grid_ok,
         )
-        fetched_ranges.append((monday.date(), (monday + timedelta(days=7)).date()))
+
+        if raw_events_count > 0 or (grid_ok and len(cells) == 0):
+            fetched_ranges.append((monday.date(), (monday + timedelta(days=7)).date()))
+
         total_cancelled += cancelled
         print(f"  • {added} eventi elaborati/salvati ({cancelled} marcati come annullati)")
+
+    # Protezione anti-wiping: se nessun evento è stato scaricato ma il calendario ne conteneva già, abortisci
+    if not seen_uids_in_window and len(events_by_uid) > 0:
+        raise RuntimeError(
+            f"ERRORE CRITICO: 0 eventi scaricati per le {len(target_mondays)} settimane richieste, "
+            f"mentre il calendario esistente contiene {len(events_by_uid)} eventi. "
+            "Interrompo l'aggiornamento per evitare di cancellare le lezioni (possibile manutenzione server UniPD)."
+        )
 
     pruned = prune_orphans(events_by_uid, seen_uids_in_window, fetched_ranges)
     if pruned > 0:

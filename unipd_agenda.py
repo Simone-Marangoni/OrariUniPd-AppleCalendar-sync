@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
@@ -120,6 +121,8 @@ def event_match_dict(component) -> dict:
     return {
         "uid": str(component.get("UID", "")),
         "summary": str(component.get("SUMMARY", "")),
+        "location": str(component.get("LOCATION", "")),
+        "description": str(component.get("DESCRIPTION", "")),
         "dtstart_str": dtstart_str_from_value(component.get("DTSTART")),
     }
 
@@ -138,22 +141,62 @@ def _cell_dtstart_key(cell: dict) -> str:
     return f"{parts[2]}{parts[1]}{parts[0]}{time_part}"
 
 
+def _normalize_subject(name: str) -> str:
+    """Normalizza il nome di un insegnamento per il confronto (rimuove prefissi, aule e punteggiatura)."""
+    name = re.sub(r"❌\s*\[ANNULLATA\]", "", name, flags=re.IGNORECASE)
+    if " – " in name:
+        name = name.split(" – ")[0]
+    elif " - " in name:
+        name = name.split(" - ")[0]
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _normalize_room(room: str) -> str:
+    """Normalizza la sigla dell'aula (es. 'TALIERCIO 1 [HUB]' -> 'taliercio1')."""
+    clean = re.sub(r"\[.*?\]", "", room)
+    return re.sub(r"[^a-z0-9]", "", clean.lower())
+
+
 def match_cell_to_ics(cell: dict, ics_event: dict) -> bool:
     """Verifica se una cella di grid_call.php corrisponde a un evento dell'ICS."""
-    uid = ics_event.get("uid", "")
+    uid = str(ics_event.get("uid", ""))
     ts = str(cell.get("timestamp", ""))
+    dtstart_str = str(ics_event.get("dtstart_str", ""))
 
+    # 1. Verifica orario e data
+    time_matches = False
     if ts and uid.startswith(ts):
-        return True
+        time_matches = True
+    else:
+        expected = _cell_dtstart_key(cell)
+        if expected and dtstart_str.startswith(expected):
+            time_matches = True
 
-    expected = _cell_dtstart_key(cell)
-    if expected and ics_event.get("dtstart_str", "").startswith(expected):
-        nome = cell.get("nome_insegnamento", "").lower()
-        summary = ics_event.get("summary", "").lower()
-        if nome and (nome in summary or summary in nome):
-            return True
+    if not time_matches:
+        return False
 
-    return False
+    # 2. Verifica insegnamento / materia (obbligatoria per evitare conflitti tra lezioni contemporanee)
+    cell_subj = _normalize_subject(cell.get("nome_insegnamento", "") or cell.get("titolo_lezione", ""))
+    summary = ics_event.get("summary", "")
+    desc = ics_event.get("description", "")
+    ev_subj = _normalize_subject(summary)
+
+    if cell_subj and ev_subj:
+        desc_clean = re.sub(r"[^a-z0-9]", "", desc.lower())
+        subj_matches = (cell_subj in ev_subj) or (ev_subj in cell_subj) or (cell_subj in desc_clean)
+        if not subj_matches:
+            return False
+
+    # 3. Verifica aula se disponibile (es. per distinguere laboratori paralleli allo stesso orario)
+    cell_room = _normalize_room(cell.get("aula", ""))
+    if cell_room:
+        location = ics_event.get("location", "")
+        all_text = f"{uid} {summary} {location} {desc}".lower()
+        clean_text = re.sub(r"[^a-z0-9]", "", all_text)
+        if cell_room not in clean_text:
+            return False
+
+    return True
 
 
 def event_matches_any_cell(event: dict, cells: list[dict]) -> bool:
